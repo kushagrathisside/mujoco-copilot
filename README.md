@@ -154,15 +154,25 @@ Backend routes currently used by the UI:
 - Activate the virtual environment before starting Uvicorn.
 - Install dependencies from the root `requirements.txt`.
 
-### Blank or stale browser title / assets
-
-- Hard-refresh the page after frontend changes.
-
 ## Documentation
 
 For the full technical walkthrough, feature reference, and design notes, see:
 
 - [README_documentation.md](./README_documentation.md)
+
+## Development & AI Assistance
+
+MuJoCo Copilot was developed through a hybrid workflow combining human engineering and AI-assisted development.
+
+- Initial scaffolding, including the frontend and a minimal monolithic backend, was generated with assistance from Claude.
+- The application was subsequently extended and re-architected by the developer into a full-featured system, including:
+  - structured XML parsing and validation
+  - patch-based LLM correction workflows
+  - 3D visualization and kinematic simulation
+  - interaction modes (edit/query) and system-level abstractions
+- Final refinement and feature coverage checks were performed with assistance from OpenAI Codex to ensure completeness across edge cases and user workflows.
+
+All architectural decisions, system design, and feature integrations were directed and implemented by the developer.
 
 ## License
 
