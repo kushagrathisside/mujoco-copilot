@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { downloadActivityLog, logAction } from "./api/activityLog";
 import BodyTreeNode from "./components/BodyTree";
 import DiffViewer from "./components/DiffViewer";
 import RobotViewer from "./components/RobotViewer";
@@ -17,19 +18,23 @@ import { computeDiff } from "./utils/xmlDiff";
 import { buildXMLSummary } from "./utils/xmlSummary";
 import { validateMuJoCoXML } from "./utils/xmlValidator";
 
+const EMPTY_PROCESSING = {mode:null,title:"",detail:"",steps:[]};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
 export default function MuJoCoEditor(){
   const [xml,setXml]             = useState(DEFAULT_XML);
   const [input,setInput]         = useState("");
-  const [messages,setMessages]   = useState([{role:"assistant",content:"Hello! I'm your MuJoCo XML editor.\n\n**New:** ⚡ Macros · 🐍 Python export · 🎯 Joint axis arrows · ▶ Kinematic sim\n\n**How to use:** `↑` edits the XML. `QUERY` or `?` answers questions only.\n\nTry a macro, a quick prompt, or ask about DOF, mass, joints, or sensors."}]);
+  const [messages,setMessages]   = useState([{role:"assistant",content:"Hello! I'm mujoco-copilot.\n\n**New:** ⚡ Macros · 🐍 Python export · 🎯 Joint axis arrows · ▶ Kinematic sim\n\n**How to use:** `↑` edits the XML. `QUERY` or `?` answers questions only.\n\nTry a macro, a quick prompt, or ask about DOF, mass, joints, or sensors."}]);
   const [chatHistory,setChatHistory] = useState([]);
   const [history,setHistory]     = useState([{xml:DEFAULT_XML,label:"Initial state",ts:Date.now()}]);
   const [historyIdx,setHistIdx]  = useState(0);
   const [loading,setLoading]     = useState(false);
   const [elapsed,setElapsed]     = useState(0);
   const elapsedRef               = useRef(null);
+  const stageTimersRef           = useRef([]);
+  const [processing,setProcessing] = useState(EMPTY_PROCESSING);
   const [diffLines,setDiffLines] = useState([]);
   const [toast,setToast]         = useState(null);
   const [panel,setPanel]         = useState("tree");
@@ -51,11 +56,47 @@ export default function MuJoCoEditor(){
   const [customSnippets,setCustomSnippets] = useState(()=>{try{return JSON.parse(localStorage.getItem("mujoco_snippets")||"[]");}catch{return[];}});
   const [customMacros,setCustomMacros]   = useState(()=>{try{return JSON.parse(localStorage.getItem("mujoco_macros")||"[]");}catch{return[];}});
   const chatEndRef = useRef(null);
+  const didLogOpenRef = useRef(false);
 
   const validation = useMemo(()=>validateMuJoCoXML(xml),[xml]);
   const bodyTree   = useMemo(()=>parseBodyTree(validation.doc),[validation.doc]);
+  const xmlStats=useCallback((value=xml)=>({
+    chars:value.length,
+    lines:value.split("\n").length,
+    valid:validateMuJoCoXML(value).valid,
+  }),[xml]);
+
+  const clearStageTimers=useCallback(()=>{
+    stageTimersRef.current.forEach(timer=>clearTimeout(timer));
+    stageTimersRef.current=[];
+  },[]);
+  const startProcessing=useCallback((mode,title,detail="")=>{
+    clearStageTimers();
+    setProcessing({mode,title,detail,steps:[{title,detail,status:"active"}]});
+  },[clearStageTimers]);
+  const advanceProcessing=useCallback((title,detail="")=>{
+    setProcessing(prev=>{
+      if(!prev.mode)return prev;
+      const completed=prev.steps.map((step,i)=>i===prev.steps.length-1?{...step,status:"done"}:step);
+      return {...prev,title,detail,steps:[...completed,{title,detail,status:"active"}].slice(-5)};
+    });
+  },[]);
+  const scheduleProcessingStage=useCallback((delay,title,detail="")=>{
+    const timer=setTimeout(()=>advanceProcessing(title,detail),delay);
+    stageTimersRef.current.push(timer);
+  },[advanceProcessing]);
+  const finishProcessing=useCallback(()=>{
+    clearStageTimers();
+    setProcessing(EMPTY_PROCESSING);
+  },[clearStageTimers]);
 
   useEffect(()=>{chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[messages]);
+  useEffect(()=>()=>clearStageTimers(),[clearStageTimers]);
+  useEffect(()=>{
+    if(didLogOpenRef.current)return;
+    didLogOpenRef.current=true;
+    logAction("app_opened",{xml:xmlStats(),provider:providerCfg.active||"ollama"});
+  },[providerCfg.active,xmlStats]);
   useEffect(()=>{
     fetch("http://localhost:8000/ollama/models")
       .then(r=>r.json()).then(d=>{setOllamaModels(d.models||[]);setOllamaStatus(true);})
@@ -70,10 +111,15 @@ export default function MuJoCoEditor(){
 
   const showToast=(msg,type="success")=>setToast({message:msg,type});
   const closeManual=()=>{
+    logAction("manual_closed");
     localStorage.setItem("mujoco_manual_seen","true");
     setShowManual(false);
   };
-  const applyVersion=idx=>{setXml(history[idx].xml);setHistIdx(idx);setDiffLines([]);setCenterTab("editor");};
+  const applyVersion=idx=>{
+    const entry=history[idx];
+    logAction("history_version_restored",{index:idx,label:entry?.label,xml:entry?xmlStats(entry.xml):null});
+    setXml(entry.xml);setHistIdx(idx);setDiffLines([]);setCenterTab("editor");
+  };
   const pushHistory=useCallback((newXml,label)=>{
     setHistory(prev=>[...prev.slice(0,historyIdx+1),{xml:newXml,label,ts:Date.now()}]);
     setHistIdx(historyIdx+1);
@@ -85,15 +131,24 @@ export default function MuJoCoEditor(){
     const ins=`\n  <!-- Snippet -->\n  ${snippetXml.replace(/\n/g,"\n  ")}\n`;
     const idx=xml.lastIndexOf("</worldbody>");
     const newXml=idx>=0?xml.slice(0,idx)+ins+xml.slice(idx):xml+ins;
+    logAction("snippet_inserted",{snippet_chars:snippetXml.length,before:xmlStats(xml),after:xmlStats(newXml)});
     setXml(newXml);pushHistory(newXml,"Snippet inserted");showToast("Snippet inserted");
-  },[xml,pushHistory]);
+  },[xml,pushHistory,xmlStats]);
 
   const repairXML=useCallback(async(badXml,errors,provider,pCfg,attempt=1)=>{
     if(attempt>3)return badXml;
     const repairPrompt=`Fix ALL validation errors in this MuJoCo XML:\nErrors:\n${errors.map(e=>`- ${e}`).join("\n")}\n\nXML:\n${badXml}`;
     try{
       const resp=await fetch("http://localhost:8000/edit",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({xml:badXml,prompt:repairPrompt,provider,model:pCfg?.model,api_key:pCfg?.apiKey})});
+        body:JSON.stringify({
+          xml:badXml,
+          prompt:repairPrompt,
+          provider,
+          model:pCfg?.model,
+          api_key:pCfg?.apiKey,
+          ollama_timeout_seconds:pCfg?.ollamaTimeoutSeconds,
+          ollama_num_predict:pCfg?.ollamaNumPredict,
+        })});
       if(!resp.ok)return badXml;
       const data=await resp.json();
       const fixed=data.xml||badXml;
@@ -106,73 +161,125 @@ export default function MuJoCoEditor(){
   // ── Natural Language Query (read-only, no XML edit) ───────────────────────
   const sendQuery=useCallback(async(q)=>{
     if(!q.trim()||loading)return;
+    const requestStartedAt=Date.now();
     setInput("");
     setMessages(prev=>[...prev,{role:"user",content:`🔍 ${q}`}]);
     setLoading(true);setElapsed(0);
+    if(elapsedRef.current)clearInterval(elapsedRef.current);
     elapsedRef.current=setInterval(()=>setElapsed(s=>s+1),1000);
     const active=providerCfg.active||"ollama";
     const pCfg=providerCfg[active]||{};
+    const providerInfo=PROVIDERS[active]||PROVIDERS.ollama;
+    startProcessing("query","Preparing question","Building read-only robot context");
     const summary=buildXMLSummary(xml);
     const queryPrompt=`You are a MuJoCo expert. Answer this question about the robot — do NOT modify the XML, just answer clearly and concisely.\n\n${summary}\n\nFull XML:\n${xml}\n\nQuestion: ${q}`;
+    logAction("query_submitted",{provider:active,model:pCfg.model,prompt_chars:q.length,xml:xmlStats()});
     try{
+      advanceProcessing("Generating answer",`${providerInfo.label}${pCfg.model?` · ${pCfg.model}`:""}`);
+      scheduleProcessingStage(10000,"Still generating","Waiting for the provider response");
       const resp=await fetch("http://localhost:8000/query",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({prompt:queryPrompt,provider:active,model:pCfg.model,api_key:pCfg.apiKey})});
+        body:JSON.stringify({
+          prompt:queryPrompt,
+          provider:active,
+          model:pCfg.model,
+          api_key:pCfg.apiKey,
+          ollama_timeout_seconds:pCfg?.ollamaTimeoutSeconds,
+          ollama_num_predict:pCfg?.ollamaNumPredict,
+        })});
+      advanceProcessing("Reading answer","Formatting assistant response");
       const data=await resp.json();
-      setMessages(prev=>[...prev,{role:"assistant",content:`**Answer:** ${data.answer||data.detail||"No response"}\n\n*${elapsed}s · ${active}*`}]);
+      const elapsedSeconds=getRequestElapsedSeconds(requestStartedAt);
+      logAction("query_completed",{provider:active,model:pCfg.model,answer_chars:(data.answer||"").length});
+      setMessages(prev=>[...prev,{role:"assistant",content:`**Answer:** ${data.answer||data.detail||"No response"}\n\n*${elapsedSeconds}s · ${active}*`}]);
     }catch(err){
+      logAction("query_failed",{provider:active,model:pCfg.model,error:err.message});
       setMessages(prev=>[...prev,{role:"assistant",content:`❌ ${err.message}`}]);
     }
-    clearInterval(elapsedRef.current);setLoading(false);
-  },[xml,providerCfg,loading,elapsed]);
+    clearInterval(elapsedRef.current);finishProcessing();setLoading(false);
+  },[xml,providerCfg,loading,xmlStats,startProcessing,advanceProcessing,scheduleProcessingStage,finishProcessing]);
 
   // ── Main edit send ────────────────────────────────────────────────────────
   const sendMessage=useCallback(async(overridePrompt)=>{
     const userMsg=(overridePrompt||input).trim();
     if(!userMsg||loading)return;
+    const requestStartedAt=Date.now();
     setInput("");
     // Route to query mode if toggled
     if(queryMode&&!overridePrompt){sendQuery(userMsg);return;}
     setMessages(prev=>[...prev,{role:"user",content:userMsg}]);
     setLoading(true);setElapsed(0);
+    if(elapsedRef.current)clearInterval(elapsedRef.current);
     elapsedRef.current=setInterval(()=>setElapsed(s=>s+1),1000);
     const active=providerCfg.active||"ollama";
     const pCfg=providerCfg[active]||{};
+    const providerInfo=PROVIDERS[active]||PROVIDERS.ollama;
+    startProcessing("edit","Preparing edit","Building XML summary and request context");
     const summary=buildXMLSummary(xml);
     const bodyCtx=selectedBody?`\nFocus on body "${selectedBody}".`:"";
     const fullPrompt=`${summary?summary+"\n\n":""}${bodyCtx}Current XML:\n${xml}\n\nRequest: ${userMsg}`;
     const recentHistory=chatHistory.slice(-12);
+    logAction("edit_submitted",{provider:active,model:pCfg.model,prompt_chars:userMsg.length,selected_body:selectedBody,history_count:recentHistory.length,xml:xmlStats()});
     try{
+      advanceProcessing("Generating XML",`${providerInfo.label}${pCfg.model?` · ${pCfg.model}`:""}`);
+      scheduleProcessingStage(10000,"Waiting for model","The model is composing an MJCF update");
+      scheduleProcessingStage(30000,"Long-running generation","Large XML or local CPU inference can take longer");
       const resp=await fetch("http://localhost:8000/edit",{method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({xml,prompt:fullPrompt,provider:active,model:pCfg.model||undefined,api_key:pCfg.apiKey||undefined,history:recentHistory})});
+        body:JSON.stringify({
+          xml,
+          prompt:fullPrompt,
+          provider:active,
+          model:pCfg.model||undefined,
+          api_key:pCfg.apiKey||undefined,
+          ollama_timeout_seconds:pCfg?.ollamaTimeoutSeconds,
+          ollama_num_predict:pCfg?.ollamaNumPredict,
+          history:recentHistory,
+        })});
       if(!resp.ok){const err=await resp.json().catch(()=>({detail:resp.statusText}));throw new Error(err.detail||`Server error ${resp.status}`);}
+      advanceProcessing("Receiving response","Backend parsing and MJCF validation completed");
       const parsed=await resp.json();
+      advanceProcessing("Applying validated XML","Checking the result in the browser");
       let newXml=parsed.xml||xml;
       const check=validateMuJoCoXML(newXml);
       if(!check.valid&&check.errors.length>0){
+        advanceProcessing("Auto-repairing XML",`${check.errors.length} frontend validation issue(s) found`);
         setMessages(prev=>[...prev,{role:"assistant",content:`⚠ Auto-repairing ${check.errors.length} error(s)…`}]);
         newXml=await repairXML(newXml,check.errors,active,pCfg);
         const fc=validateMuJoCoXML(newXml);
         if(fc.valid)showToast("Auto-repair succeeded ✓");else showToast(`${fc.errors.length} errors remain`,"warn");
       }
+      advanceProcessing("Updating workspace","Computing diff, history, and preview state");
       const diff=computeDiff(xml,newXml);
       setDiffLines(diff);setXml(newXml);
       pushHistory(newXml,userMsg.slice(0,48));
       setCenterTab("3d");
+      const elapsedSeconds=getRequestElapsedSeconds(requestStartedAt);
       const adds=diff.filter(d=>d.type==="add").length,dels=diff.filter(d=>d.type==="remove").length;
-      const assistantMsg=`**${parsed.reasoning||"Done"}**\n\n${(parsed.changes||[]).map(c=>`• ${c}`).join("\n")}\n\n*+${adds}/-${dels} lines · ${parsed.model_used||active} · ${elapsed}s*`;
+      logAction("edit_completed",{provider:active,model:pCfg.model,strategy:parsed.strategy,adds,dels,changes_count:(parsed.changes||[]).length,before:xmlStats(xml),after:xmlStats(newXml)});
+      const assistantMsg=`**${parsed.reasoning||"Done"}**\n\n${(parsed.changes||[]).map(c=>`• ${c}`).join("\n")}\n\n*+${adds}/-${dels} lines · ${parsed.model_used||active} · ${elapsedSeconds}s*`;
       setMessages(prev=>[...prev,{role:"assistant",content:assistantMsg}]);
       setChatHistory(prev=>[...prev,{role:"user",content:userMsg},{role:"assistant",content:assistantMsg}]);
-      showToast(`Updated (+${adds}/-${dels}) · ${elapsed}s`);
+      showToast(`Updated (+${adds}/-${dels}) · ${elapsedSeconds}s`);
     }catch(err){
+      logAction("edit_failed",{provider:active,model:pCfg.model,error:err.message,prompt_chars:userMsg.length,xml:xmlStats()});
       setMessages(prev=>[...prev,{role:"assistant",content:`❌ ${err.message}`}]);
       showToast(err.message,"error");
     }
-    clearInterval(elapsedRef.current);setLoading(false);
-  },[input,xml,loading,providerCfg,chatHistory,selectedBody,elapsed,queryMode,pushHistory,repairXML,sendQuery]);
+    clearInterval(elapsedRef.current);finishProcessing();setLoading(false);
+  },[input,xml,loading,providerCfg,chatHistory,selectedBody,queryMode,pushHistory,repairXML,sendQuery,xmlStats,startProcessing,advanceProcessing,scheduleProcessingStage,finishProcessing]);
 
   const handleKey=e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage();}};
-  const copyXml=()=>{navigator.clipboard.writeText(xml);showToast("Copied!");};
-  const downloadXml=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([xml],{type:"text/xml"}));a.download="robot.xml";a.click();};
+  const copyXml=()=>{logAction("xml_copied",{xml:xmlStats()});navigator.clipboard.writeText(xml);showToast("Copied!");};
+  const downloadXml=()=>{logAction("xml_downloaded",{xml:xmlStats()});const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([xml],{type:"text/xml"}));a.download="robot.xml";a.click();};
+  const downloadLog=async()=>{
+    try{
+      await logAction("activity_log_download_requested",{history_count:history.length,xml:xmlStats()});
+      await downloadActivityLog();
+      showToast("Activity log downloaded");
+    }catch(err){
+      showToast(err.message,"error");
+    }
+  };
+  const getRequestElapsedSeconds=(startedAt)=>Math.max(1, Math.round((Date.now()-startedAt)/1000));
   const formatTs=ts=>new Date(ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
   const handleBodySelect=name=>{setSelectedBody(s=>s===name?null:name);if(name)setInput(`Modify the "${name}" body: `);setCenterTab("3d");};
 
@@ -200,8 +307,8 @@ export default function MuJoCoEditor(){
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 12px",height:46,background:"#0f172a",borderBottom:"1px solid #1e293b",flexShrink:0}}>
         <div style={{display:"flex",alignItems:"center",gap:7}}>
           <div style={{width:22,height:22,background:"linear-gradient(135deg,#3b82f6,#7c3aed)",borderRadius:5,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11}}>⚙</div>
-          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:14,color:"#f1f5f9"}}>MuJoCo</span>
-          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#7dd3fc"}}>XML Editor</span>
+          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:14,color:"#f1f5f9"}}>mujoco-</span>
+          <span style={{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:14,color:"#7dd3fc"}}>copilot</span>
           <div style={{width:1,height:14,background:"#1e293b"}}/>
           {/* Provider badge */}
           <div title="Provider Settings: open provider and model settings for the current AI service." style={{display:"flex",alignItems:"center",gap:5,background:"#1e293b",border:`1px solid ${pInfo.color}44`,borderRadius:6,padding:"2px 9px",cursor:"pointer"}} onClick={()=>setShowSettings(true)}>
@@ -251,6 +358,8 @@ export default function MuJoCoEditor(){
             style={{padding:"3px 9px",background:"#1e293b",color:"#94a3b8",borderRadius:5,fontSize:11,border:"1px solid #334155"}}>⚙</button>
           <button className="btn" title="Copy XML: copy the current MuJoCo XML to the clipboard." onClick={copyXml}
             style={{padding:"3px 9px",background:"#1e293b",color:"#94a3b8",borderRadius:5,fontSize:11,border:"1px solid #334155"}}>⎘</button>
+          <button className="btn" title="Download Activity Log: save a JSONL history of major app actions for analysis or GPT troubleshooting." onClick={downloadLog}
+            style={{padding:"3px 9px",background:"#1e293b",color:"#fbbf24",borderRadius:5,fontSize:11,border:"1px solid #334155"}}>↓ log</button>
           <button className="btn" title="Download XML: save the current robot model as an XML file." onClick={downloadXml}
             style={{padding:"3px 9px",background:"#1e3a5f",color:"#7dd3fc",borderRadius:5,fontSize:11,border:"1px solid #2d5f8a"}}>↓ .xml</button>
         </div>
@@ -284,11 +393,25 @@ export default function MuJoCoEditor(){
               </div>
             ))}
             {loading&&(
-              <div style={{display:"flex",alignItems:"center",gap:8,color:"#64748b",fontSize:12}}>
-                <div style={{width:14,height:14,border:"2px solid #334155",borderTopColor:pInfo.color,borderRadius:"50%",animation:"spin 0.8s linear infinite"}}/>
-                <div>
-                  <div>{queryMode?"🔍":"⚙"} {pInfo.icon} {elapsed}s{queryMode?" (query)":""}</div>
-                  {elapsed>30&&<div style={{fontSize:10,color:"#334155",marginTop:1}}>CPU mode — please wait…</div>}
+              <div style={{display:"flex",alignItems:"flex-start",gap:8,color:"#64748b",fontSize:12}}>
+                <div style={{width:14,height:14,border:"2px solid #334155",borderTopColor:pInfo.color,borderRadius:"50%",animation:"spin 0.8s linear infinite",marginTop:2,flexShrink:0}}/>
+                <div style={{minWidth:0,flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    <span>{queryMode?"🔍":"⚙"} {pInfo.icon} {elapsed}s{queryMode?" (query)":""}</span>
+                    {processing.title&&<span style={{color:pInfo.color,fontWeight:600}}>{processing.title}</span>}
+                  </div>
+                  {processing.detail&&<div style={{fontSize:10,color:"#64748b",marginTop:2,lineHeight:1.45}}>{processing.detail}</div>}
+                  {processing.steps.length>1&&(
+                    <div style={{display:"flex",flexDirection:"column",gap:2,marginTop:5}}>
+                      {processing.steps.map((step,i)=>(
+                        <div key={`${step.title}-${i}`} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:step.status==="done"?"#475569":pInfo.color,lineHeight:1.35}}>
+                          <span style={{width:10,display:"inline-block",color:step.status==="done"?"#166534":pInfo.color}}>{step.status==="done"?"✓":"•"}</span>
+                          <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{step.title}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {elapsed>30&&<div style={{fontSize:10,color:"#334155",marginTop:4}}>CPU mode or large model — please wait…</div>}
                 </div>
               </div>
             )}

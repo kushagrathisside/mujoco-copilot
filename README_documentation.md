@@ -1,4 +1,4 @@
-# MuJoCo XML Editor
+# mujoco-copilot
 
 A full-stack AI-powered editor for MuJoCo robot XML files. Write a prompt, get a modified robot. See it in 3D. Simulate the joints. Export to Python. All in the browser.
 
@@ -47,7 +47,7 @@ A full-stack AI-powered editor for MuJoCo robot XML files. Write a prompt, get a
 
 ## What It Is
 
-MuJoCo XML Editor lets you design and iterate on robot models using natural language. Instead of hand-editing verbose XML, you describe what you want ("add a 6-DOF arm to the torso", "mirror the left leg", "add damping to all joints") and an LLM rewrites the XML for you. You see the result immediately in a 3D viewer with orbit controls, can animate the joints kinematically, inspect the body hierarchy in a tree, and export a ready-to-run Python simulation script.
+`mujoco-copilot` lets you design and iterate on robot models using natural language. Instead of hand-editing verbose XML, you describe what you want ("add a 6-DOF arm to the torso", "mirror the left leg", "add damping to all joints") and an LLM rewrites the XML for you. You see the result immediately in a 3D viewer with orbit controls, can animate the joints kinematically, inspect the body hierarchy in a tree, follow staged request progress in chat, and export a ready-to-run Python simulation script.
 
 It supports five LLM backends (Ollama locally, Anthropic, OpenAI, Gemini, Groq) and works entirely offline if you have Ollama installed.
 
@@ -94,6 +94,7 @@ It supports five LLM backends (Ollama locally, Anthropic, OpenAI, Gemini, Groq) 
 - Validation runs **entirely in the browser** using `DOMParser`. No MuJoCo WASM needed.
 - API keys are stored in `localStorage` and sent per-request. They are never logged server-side.
 - The backend is a thin proxy — it adds the system prompt and routes to the right provider. All state lives in the browser.
+- For Ollama, the UI can override timeout and max output per request, while `.env` supplies the fallback defaults.
 
 ---
 
@@ -128,7 +129,11 @@ cp .env.example .env
 # Edit .env to set your preferred defaults (optional)
 # OLLAMA_MODEL=qwen2.5:14b
 # OLLAMA_BASE_URL=http://localhost:11434
+# OLLAMA_TIMEOUT_SECONDS=300
+# OLLAMA_NUM_PREDICT=8192
 ```
+
+These `.env` values are fallback defaults. In the app, open `Settings` -> `Ollama (local)` to change the active model, timeout, and max output from the UI.
 
 **`requirements.txt` contents:**
 ```
@@ -137,26 +142,17 @@ uvicorn[standard]>=0.29.0
 httpx>=0.27.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
+json-repair
 ```
 
 ### Frontend Setup
 
 ```bash
-# Create a new Vite + React project
-npm create vite@latest mujoco-ui -- --template react
-cd mujoco-ui
+# From the repository root
+cd frontend/mujoco-ui
 
 # Install dependencies
 npm install
-
-# Install Three.js (required for 3D viewer)
-npm install three
-
-# Replace the default App.jsx with the editor
-cp /path/to/mujoco-editor.jsx src/App.jsx
-
-# Remove default CSS imports if any from src/main.jsx
-# The editor uses all inline styles — no external CSS needed
 ```
 
 ### Ollama Setup
@@ -182,7 +178,15 @@ curl http://localhost:11434/api/tags
 
 ## Running the App
 
-Open two terminals:
+Start Ollama, the backend, and the frontend together:
+
+```bash
+./run-dev.sh
+```
+
+This opens the app at `http://localhost:5173`.
+
+If you prefer manual startup, open two terminals:
 
 **Terminal 1 — Backend:**
 ```bash
@@ -198,7 +202,7 @@ INFO:     Application startup complete.
 
 **Terminal 2 — Frontend:**
 ```bash
-cd mujoco-ui
+cd frontend/mujoco-ui
 npm run dev
 ```
 
@@ -217,6 +221,8 @@ curl http://localhost:8000/health
 ### AI Chat Editor
 
 The left panel is a conversation interface. Type a natural language instruction and press **Enter** (or Shift+Enter for newline). The editor sends your current XML + structural summary to the LLM, which returns a fully rewritten XML with a brief explanation of what changed.
+
+While a request is running, the chat panel shows staged progress such as preparing context, waiting for the model, receiving the response, and applying validated XML. This is especially helpful on slower local Ollama setups.
 
 **What to say:**
 ```
@@ -531,7 +537,7 @@ ollama serve          # starts Ollama daemon
 ollama pull <model>   # download a model first
 ```
 
-The settings panel shows a live `● running` / `● not detected` status and a dropdown of all pulled models.
+The settings panel shows a live `● running` / `● not detected` status, a dropdown of all pulled models, plus request controls for `Timeout (s)` and `Max output`.
 
 **Recommended models by RAM:**
 
@@ -544,6 +550,12 @@ The settings panel shows a live `● running` / `● not detected` status and a 
 | `qwen2.5:32b` | ~20GB | Very slow | Overkill |
 
 With a GPU (CUDA/Metal), all models run in seconds.
+
+The UI sends the selected Ollama model, timeout, and max output with both edit and query requests. If no UI override is set, the backend falls back to:
+
+- `OLLAMA_MODEL`
+- `OLLAMA_TIMEOUT_SECONDS`
+- `OLLAMA_NUM_PREDICT`
 
 ### Anthropic
 
@@ -812,7 +824,7 @@ On a 16 GB RAM CPU-only machine, expect:
 
 The elapsed timer in the chat (e.g. `⚙ 🦙 47s`) shows wall time. After 30 seconds a note appears: *"CPU mode — please wait…"*
 
-The backend Ollama timeout is set to **900 seconds** to accommodate slow hardware. Cloud providers (Anthropic, Groq, etc.) time out after **120 seconds** — strongly preferred if you have an API key and want fast iteration.
+The backend Ollama timeout defaults to **300 seconds** and the edit response budget defaults to `OLLAMA_NUM_PREDICT=8192`. You can change both directly in `Settings` -> `Ollama (local)`, or set `.env` fallback values with `OLLAMA_TIMEOUT_SECONDS` and `OLLAMA_NUM_PREDICT`. Cloud providers (Anthropic, Groq, etc.) time out after **120 seconds** and are still the fastest option if you have an API key.
 
 ### GPU (CUDA / Apple Metal)
 

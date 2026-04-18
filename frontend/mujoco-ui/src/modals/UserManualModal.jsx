@@ -27,7 +27,7 @@ function UserManualModal({ onClose }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: "#f8fafc", marginBottom: 4 }}>📘 User Manual</div>
-            <div style={{ fontSize: 12, color: "#64748b" }}>Quick orientation for first-time MuJoCo XML Editor users.</div>
+            <div style={{ fontSize: 12, color: "#64748b" }}>Quick orientation for first-time mujoco-copilot users.</div>
           </div>
           <button title="Close User Manual: return to the editor." onClick={onClose} style={{ background: "none", border: "none", color: "#475569", fontSize: 18, cursor: "pointer" }}>✕</button>
         </div>

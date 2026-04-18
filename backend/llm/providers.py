@@ -2,10 +2,10 @@ import os
 import httpx
 from fastapi import HTTPException
 
-from llm.json_parser import extract_json
-
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "8192"))
 
 
 # ── Build message list ──────────────────────────────────────────────
@@ -22,7 +22,17 @@ def build_messages(prompt: str, history: list):
 
 
 # ── Ollama ──────────────────────────────────────────────────────────
-async def call_ollama(prompt: str, model: str, history: list, system_prompt: str):
+async def call_ollama(
+    prompt: str,
+    model: str,
+    history: list,
+    system_prompt: str,
+    timeout_seconds: float | None = None,
+    num_predict: int | None = None,
+):
+
+    timeout_seconds = sanitize_ollama_timeout(timeout_seconds)
+    num_predict = sanitize_ollama_num_predict(num_predict)
 
     messages = [{"role": "system", "content": system_prompt}] + build_messages(prompt, history)
 
@@ -31,7 +41,7 @@ async def call_ollama(prompt: str, model: str, history: list, system_prompt: str
         "stream": False,
         "options": {
             "temperature": 0.1,
-            "num_predict": 1024,
+            "num_predict": num_predict,
             "num_ctx": 4096
         },
         "messages": messages
@@ -43,7 +53,7 @@ async def call_ollama(prompt: str, model: str, history: list, system_prompt: str
 
         try:
 
-            async with httpx.AsyncClient(timeout=120.0) as c:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as c:
                 r = await c.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
 
             if r.status_code != 200:
@@ -51,7 +61,7 @@ async def call_ollama(prompt: str, model: str, history: list, system_prompt: str
 
             raw = r.json().get("message", {}).get("content", "")
 
-            return extract_json(raw)
+            return raw
 
         except Exception as e:
 
@@ -59,6 +69,18 @@ async def call_ollama(prompt: str, model: str, history: list, system_prompt: str
             print(f"Ollama attempt {attempt+1} failed:", e)
 
     raise HTTPException(502, f"Ollama failed after retries: {last_error}")
+
+
+def sanitize_ollama_timeout(value: float | None) -> float:
+    if value is None:
+        return OLLAMA_TIMEOUT_SECONDS
+    return max(30.0, float(value))
+
+
+def sanitize_ollama_num_predict(value: int | None) -> int:
+    if value is None:
+        return OLLAMA_NUM_PREDICT
+    return max(256, int(value))
 
 
 # ── Anthropic ───────────────────────────────────────────────────────
@@ -83,7 +105,7 @@ async def call_anthropic(prompt: str, model: str, api_key: str, history: list, s
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"Anthropic: {r.text[:400]}")
 
-    return extract_json("".join(b.get("text", "") for b in r.json().get("content", [])))
+    return "".join(b.get("text", "") for b in r.json().get("content", []))
 
 
 # ── OpenAI ──────────────────────────────────────────────────────────
@@ -109,7 +131,7 @@ async def call_openai(prompt: str, model: str, api_key: str, history: list, syst
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"OpenAI: {r.text[:400]}")
 
-    return extract_json(r.json()["choices"][0]["message"]["content"])
+    return r.json()["choices"][0]["message"]["content"]
 
 
 # ── Gemini ──────────────────────────────────────────────────────────
@@ -140,7 +162,7 @@ async def call_gemini(prompt: str, model: str, api_key: str, history: list, syst
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"Gemini: {r.text[:400]}")
 
-    return extract_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
 # ── Groq ────────────────────────────────────────────────────────────
@@ -166,4 +188,4 @@ async def call_groq(prompt: str, model: str, api_key: str, history: list, system
     if r.status_code != 200:
         raise HTTPException(r.status_code, f"Groq: {r.text[:400]}")
 
-    return extract_json(r.json()["choices"][0]["message"]["content"])
+    return r.json()["choices"][0]["message"]["content"]
