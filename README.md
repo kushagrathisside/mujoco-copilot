@@ -1,16 +1,18 @@
-# MuJoCo Copilot — AI-Powered Robot Design Studio
+# mujoco-copilot — AI-Powered Robot Design Studio
 
-MuJoCo Copilot is a full-stack AI assistant for editing MuJoCo robot XML. It lets you describe a change in plain language, preview the result in 3D, inspect the diff, validate the XML, and export a Python simulation script from the browser.
+`mujoco-copilot` is a full-stack AI assistant for editing MuJoCo robot XML. It lets you describe a change in plain language, preview the result in 3D, inspect the diff, validate the XML, and export a Python simulation script from the browser.
 
 ## What You Get
 
 - Natural-language MuJoCo XML editing
 - Read-only query mode for questions like DOF, mass, and structure
+- Staged processing feedback during long-running edit and query requests
 - Live 3D viewer with body selection
 - XML diff view and version history
 - Validation warnings and error detection
 - Prompt macros and snippet library
 - Python export for simulation workflows
+- Downloadable JSONL activity log for support and GPT troubleshooting
 - Multi-provider support: Ollama, OpenAI, Anthropic, Gemini, and Groq
 
 ## Project Layout
@@ -52,6 +54,8 @@ Notes:
 - `requirements.txt` lives at the repository root, not inside `backend/`.
 - `.env.example` also lives at the repository root.
 - The backend serves the editor API on `http://localhost:8000`.
+- `.env` provides fallback Ollama defaults for timeout and output length.
+- In the app, open `Settings` -> `Ollama (local)` to adjust `Timeout (s)` and `Max output` per request without restarting anything.
 
 ### 2. Frontend
 
@@ -86,9 +90,43 @@ ollama pull qwen2.5:7b
 
 The frontend checks Ollama availability through the backend and lists local models in Settings.
 
-## Daily Run Commands
+If local generation is slow on your machine, you can either raise it in the UI under `Settings` -> `Ollama (local)` or set the fallback in `.env`:
 
-After the first install, you usually only need:
+```bash
+OLLAMA_TIMEOUT_SECONDS=300
+```
+
+If Ollama returns incomplete XML or errors like `Invalid XML: unclosed token`, raise `Max output` in the same Settings panel or increase the fallback edit output budget in `.env`:
+
+```bash
+OLLAMA_NUM_PREDICT=8192
+```
+
+## Daily Run Command
+
+After the first install, start Ollama, the backend, and the frontend together:
+
+```bash
+./run-dev.sh
+```
+
+This launches:
+
+- Ollama on `http://localhost:11434` if it is not already running
+- FastAPI backend on `http://localhost:8000`
+- Vite frontend on `http://localhost:5173`
+
+Press `Ctrl+C` in that terminal to stop the services started by the script.
+
+You can override the default ports when needed:
+
+```bash
+BACKEND_PORT=8010 FRONTEND_PORT=5174 ./run-dev.sh
+```
+
+### Manual Run Commands
+
+If you prefer separate terminals:
 
 Backend:
 
@@ -125,17 +163,51 @@ npm run dev
 | Gemini   | Yes      | Yes       | Yes |
 | Groq     | Yes      | Yes       | Yes |
 
+### Ollama Settings
+
+For local Ollama models, the Settings modal now exposes:
+
+- `Model`
+- `Timeout (s)`
+- `Max output`
+
+These values are sent with edit and query requests. The `.env` values `OLLAMA_TIMEOUT_SECONDS` and `OLLAMA_NUM_PREDICT` still act as defaults when no UI override is set.
+
 ## Key API Endpoints
 
 Backend routes currently used by the UI:
 
 - `GET /health`
 - `GET /ollama/models`
+- `GET /logs/activity`
 - `POST /edit`
+- `POST /events`
 - `POST /query`
 - `POST /analyze`
 - `POST /graph`
 - `POST /kinematics/path`
+
+## Activity Log
+
+The app keeps a local downloadable JSONL activity log at `logs/activity.jsonl`.
+Use the `↓ log` button in the header, or call:
+
+```text
+http://localhost:8000/logs/activity
+```
+
+The log records major actions such as edit/query requests, validation failures,
+snippet insertion, history restores, XML downloads, and frontend/backend timing.
+By default it stores metadata, sizes, hashes, providers, models, and error
+messages, but not API keys, raw prompts, or raw XML.
+
+For local debugging only, you can opt into truncated prompt/XML content:
+
+```bash
+ACTION_LOG_INCLUDE_CONTENT=true ./run-dev.sh
+```
+
+Do not enable raw-content logs when working with secrets or private robot models.
 
 ## Troubleshooting
 
@@ -162,7 +234,7 @@ For the full technical walkthrough, feature reference, and design notes, see:
 
 ## Development & AI Assistance
 
-MuJoCo Copilot was developed through a hybrid workflow combining human engineering and AI-assisted development.
+`mujoco-copilot` was developed through a hybrid workflow combining human engineering and AI-assisted development.
 
 - Initial scaffolding, including the frontend and a minimal monolithic backend, was generated with assistance from Claude.
 - The application was subsequently extended and re-architected by the developer into a full-featured system, including:

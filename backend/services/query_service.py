@@ -1,10 +1,16 @@
 import os
+import time
 import httpx
 from fastapi import HTTPException
+
+from llm.providers import sanitize_ollama_num_predict, sanitize_ollama_timeout
+from utils.action_logger import log_action, summarize_text
 
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "1024"))
 
 
 QUERY_SYSTEM = """
@@ -18,6 +24,8 @@ async def process_query(req):
 
     provider = req.provider.lower()
     model = req.model or OLLAMA_MODEL
+    started_at = time.perf_counter()
+    log_query_event("llm_query_started", req, provider, model, started_at)
     env_key_map = {
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
@@ -27,13 +35,15 @@ async def process_query(req):
     key = req.api_key or os.getenv(env_key_map.get(provider, ""), "")
 
     if provider == "ollama":
+        timeout_seconds = sanitize_ollama_timeout(req.ollama_timeout_seconds)
+        num_predict = sanitize_ollama_num_predict(req.ollama_num_predict)
 
         payload = {
             "model": model,
             "stream": False,
             "options": {
                 "temperature": 0.2,
-                "num_predict": 1024
+                "num_predict": num_predict
             },
             "messages": [
                 {"role": "system", "content": QUERY_SYSTEM},
@@ -41,13 +51,16 @@ async def process_query(req):
             ]
         }
 
-        async with httpx.AsyncClient(timeout=300.0) as c:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as c:
             r = await c.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload)
 
-        return {"answer": r.json().get("message", {}).get("content", "")}
+        answer = r.json().get("message", {}).get("content", "")
+        log_query_event("llm_query_completed", req, provider, model, started_at, {"answer": summarize_text(answer)})
+        return {"answer": answer}
 
     if provider == "anthropic":
         if not key:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": "Anthropic API key required", "status_code": 400})
             raise HTTPException(400, "Anthropic API key required")
 
         payload = {
@@ -66,12 +79,16 @@ async def process_query(req):
         async with httpx.AsyncClient(timeout=60.0) as c:
             r = await c.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
         if r.status_code != 200:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": r.text[:400], "status_code": r.status_code})
             raise HTTPException(r.status_code, f"Anthropic query failed: {r.text[:400]}")
 
-        return {"answer": "".join(block.get("text", "") for block in r.json().get("content", []))}
+        answer = "".join(block.get("text", "") for block in r.json().get("content", []))
+        log_query_event("llm_query_completed", req, provider, model, started_at, {"answer": summarize_text(answer)})
+        return {"answer": answer}
 
     if provider == "openai":
         if not key:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": "OpenAI API key required", "status_code": 400})
             raise HTTPException(400, "OpenAI API key required")
 
         payload = {
@@ -92,12 +109,16 @@ async def process_query(req):
         async with httpx.AsyncClient(timeout=60.0) as c:
             r = await c.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
         if r.status_code != 200:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": r.text[:400], "status_code": r.status_code})
             raise HTTPException(r.status_code, f"OpenAI query failed: {r.text[:400]}")
 
-        return {"answer": r.json()["choices"][0]["message"]["content"]}
+        answer = r.json()["choices"][0]["message"]["content"]
+        log_query_event("llm_query_completed", req, provider, model, started_at, {"answer": summarize_text(answer)})
+        return {"answer": answer}
 
     if provider == "gemini":
         if not key:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": "Google API key required", "status_code": 400})
             raise HTTPException(400, "Google API key required")
 
         payload = {
@@ -114,12 +135,16 @@ async def process_query(req):
         async with httpx.AsyncClient(timeout=60.0) as c:
             r = await c.post(url, json=payload)
         if r.status_code != 200:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": r.text[:400], "status_code": r.status_code})
             raise HTTPException(r.status_code, f"Gemini query failed: {r.text[:400]}")
 
-        return {"answer": r.json()["candidates"][0]["content"]["parts"][0]["text"]}
+        answer = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        log_query_event("llm_query_completed", req, provider, model, started_at, {"answer": summarize_text(answer)})
+        return {"answer": answer}
 
     if provider == "groq":
         if not key:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": "Groq API key required", "status_code": 400})
             raise HTTPException(400, "Groq API key required")
 
         payload = {
@@ -140,8 +165,26 @@ async def process_query(req):
         async with httpx.AsyncClient(timeout=60.0) as c:
             r = await c.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers)
         if r.status_code != 200:
+            log_query_event("llm_query_failed", req, provider, model, started_at, {"error": r.text[:400], "status_code": r.status_code})
             raise HTTPException(r.status_code, f"Groq query failed: {r.text[:400]}")
 
-        return {"answer": r.json()["choices"][0]["message"]["content"]}
+        answer = r.json()["choices"][0]["message"]["content"]
+        log_query_event("llm_query_completed", req, provider, model, started_at, {"answer": summarize_text(answer)})
+        return {"answer": answer}
 
+    log_query_event("llm_query_failed", req, provider, model, started_at, {"error": "Provider not supported"})
     return {"answer": "Provider not supported for queries."}
+
+
+def log_query_event(event_type, req, provider, model, started_at, extra=None):
+    details = {
+        "provider": provider,
+        "model": model,
+        "duration_ms": round((time.perf_counter() - started_at) * 1000),
+        "prompt": summarize_text(req.prompt),
+    }
+    if provider == "ollama":
+        details["ollama_timeout_seconds"] = req.ollama_timeout_seconds
+        details["ollama_num_predict"] = req.ollama_num_predict
+    details.update(extra or {})
+    log_action(event_type, details=details)

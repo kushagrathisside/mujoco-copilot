@@ -1,5 +1,5 @@
 """
-MuJoCo XML Editor — FastAPI Backend
+mujoco-copilot — FastAPI Backend
 Providers: Ollama · Anthropic · OpenAI · Gemini · Groq
 Features:  Multi-turn history · Robot-aware context · Auto-repair loop
 """
@@ -7,9 +7,10 @@ Features:  Multi-turn history · Robot-aware context · Auto-repair loop
 import os
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from schemas.requests import EditRequest, QueryRequest
+from schemas.requests import ActionEventRequest, EditRequest, QueryRequest
 
 load_dotenv()
 
@@ -19,11 +20,12 @@ from mjcf.analyzer import analyze_robot_structure
 from mjcf.graph_builder import build_robot_graph
 from mjcf.kinematics import find_kinematic_path
 from mjcf.converters.urdf_to_mjcf import urdf_to_mjcf
+from utils.action_logger import get_activity_log_path, log_action
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "qwen2.5:7b")
 
-app = FastAPI(title="MuJoCo XML Editor API")
+app = FastAPI(title="mujoco-copilot API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:5173"],
@@ -87,6 +89,26 @@ async def edit_xml(req: EditRequest):
 async def query_xml(req: QueryRequest):
 
     return await process_query(req)
+
+@app.post("/events")
+async def record_event(req: ActionEventRequest):
+
+    log_action(req.event_type, source=req.source, details=req.details)
+    return {"ok": True}
+
+@app.get("/logs/activity")
+async def download_activity_log():
+
+    path = get_activity_log_path()
+    log_action(
+        "activity_log_downloaded",
+        details={"size_bytes": path.stat().st_size},
+    )
+    return FileResponse(
+        path,
+        media_type="application/x-ndjson",
+        filename="mujoco-copilot-activity.jsonl",
+    )
 
 @app.post("/analyze")
 async def analyze_xml(req: EditRequest):

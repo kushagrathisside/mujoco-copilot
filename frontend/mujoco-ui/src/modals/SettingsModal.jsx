@@ -11,11 +11,15 @@ function SettingsModal({onClose,providerCfg,setProviderCfg,ollamaModels,ollamaSt
   const [showKey,setShowKey]=useState({});
   const save=()=>{
     Object.entries(local).forEach(([p,cfg])=>{
+      if(p==="active") return;
       if(cfg?.apiKey) localStorage.setItem(`mujoco_key_${p}`,cfg.apiKey);
       else localStorage.removeItem(`mujoco_key_${p}`);
+      if(cfg?.model) localStorage.setItem(`mujoco_model_${p}`,cfg.model);
     });
     localStorage.setItem("mujoco_provider",local.active);
     localStorage.setItem("mujoco_model",local[local.active]?.model||"");
+    localStorage.setItem("mujoco_ollama_timeout_seconds",String(local.ollama?.ollamaTimeoutSeconds||PROVIDERS.ollama.defaultTimeoutSeconds));
+    localStorage.setItem("mujoco_ollama_num_predict",String(local.ollama?.ollamaNumPredict||PROVIDERS.ollama.defaultNumPredict));
     setProviderCfg(local);onClose();
   };
   return(
@@ -47,6 +51,33 @@ function SettingsModal({onClose,providerCfg,setProviderCfg,ollamaModels,ollamaSt
                {ollamaModels.map(m=><option key={m} value={m}>{m}</option>)}
              </select>
             :<div style={{fontSize:11,color:"#475569"}}>No models. Run: <code style={{color:"#a78bfa"}}>ollama pull qwen2.5:14b</code></div>}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:10}}>
+            <label style={{display:"flex",flexDirection:"column",gap:4,fontSize:11,color:"#94a3b8"}}>
+              <span>Timeout (s)</span>
+              <input
+                type="number"
+                min="30"
+                step="30"
+                value={local.ollama?.ollamaTimeoutSeconds ?? PROVIDERS.ollama.defaultTimeoutSeconds}
+                onChange={e=>setLocal(l=>({...l,ollama:{...l.ollama,ollamaTimeoutSeconds:Number(e.target.value)||PROVIDERS.ollama.defaultTimeoutSeconds}}))}
+                style={{background:"#0f172a",border:"1px solid #334155",color:"#e2e8f0",padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:"inherit",outline:"none"}}
+              />
+            </label>
+            <label style={{display:"flex",flexDirection:"column",gap:4,fontSize:11,color:"#94a3b8"}}>
+              <span>Max output</span>
+              <input
+                type="number"
+                min="256"
+                step="256"
+                value={local.ollama?.ollamaNumPredict ?? PROVIDERS.ollama.defaultNumPredict}
+                onChange={e=>setLocal(l=>({...l,ollama:{...l.ollama,ollamaNumPredict:Number(e.target.value)||PROVIDERS.ollama.defaultNumPredict}}))}
+                style={{background:"#0f172a",border:"1px solid #334155",color:"#e2e8f0",padding:"6px 10px",borderRadius:6,fontSize:12,fontFamily:"inherit",outline:"none"}}
+              />
+            </label>
+          </div>
+          <div style={{fontSize:10,color:"#64748b",marginTop:8,lineHeight:1.5}}>
+            Increase timeout for slower local inference. Increase max output if XML replies get cut off.
+          </div>
         </div>
         {Object.keys(PROVIDERS).filter(p=>p!=="ollama").map(p=>{
           const{label,icon,color,models,defaultModel}=PROVIDERS[p];

@@ -1,36 +1,44 @@
 import json
-import re
+
+from json_repair import loads as repair_json_loads
+
+
+class LLMJSONParseError(ValueError):
+    pass
 
 
 def extract_json(raw: str) -> dict:
-    text = raw.strip()
+    return parse_json_with_repair(raw)
 
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-z]*\n?", "", text)
-        text = re.sub(r"\n?```$", "", text).strip()
+
+def parse_json_with_repair(raw: str) -> dict:
+    text = (raw or "").strip()
+
+    if not text:
+        raise LLMJSONParseError("LLM returned an empty response")
+
+    strict_error = None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        strict_error = e
+    else:
+        if isinstance(parsed, dict):
+            return parsed
+        raise LLMJSONParseError(
+            f"LLM JSON root must be an object, got {type(parsed).__name__}"
+        )
 
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+        repaired = repair_json_loads(text)
+    except Exception as e:
+        raise LLMJSONParseError(
+            f"LLM returned invalid JSON and repair failed: {strict_error}; {e}"
+        ) from e
 
-    s = text.find("{")
-    e = text.rfind("}") + 1
+    if isinstance(repaired, dict):
+        return repaired
 
-    if s != -1 and e > s:
-        try:
-            return json.loads(text[s:e])
-        except json.JSONDecodeError:
-            pass
-
-    repaired = text.replace("'", '"')
-    s = repaired.find("{")
-    e = repaired.rfind("}") + 1
-
-    if s != -1 and e > s:
-        try:
-            return json.loads(repaired[s:e])
-        except json.JSONDecodeError:
-            pass
-
-    raise ValueError(f"LLM returned invalid JSON:\n{raw[:800]}")
+    raise LLMJSONParseError(
+        f"LLM returned invalid JSON; repair produced {type(repaired).__name__}"
+    )
